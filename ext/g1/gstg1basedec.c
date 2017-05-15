@@ -663,7 +663,7 @@ gst_g1_base_dec_allocate_output (GstG1BaseDec * dec, GstVideoCodecFrame * frame)
 
   /* Width and Height of the video overlay taken from user */
 
-  	dec->ppconfig.ppOutFrmBuffer.enable = 1;
+    dec->ppconfig.ppOutFrmBuffer.enable = 1;
     dec->ppconfig.ppOutFrmBuffer.writeOriginX = dec->x;
     dec->ppconfig.ppOutFrmBuffer.writeOriginY = dec->y;
     dec->ppconfig.ppOutFrmBuffer.frameBufferWidth = (divRoundClosest(dec->w, 16)*16);
