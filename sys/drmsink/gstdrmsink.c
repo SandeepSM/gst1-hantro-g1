@@ -29,6 +29,7 @@
  *  Alessandro Decina <alessandro.decina@collabora.co.uk>
  *  Víctor Manuel Jáquez Leal <vjaquez@igalia.com>
  *  Venkatesh Prabhu Seluka  <venkateshprabhu.subramanian@atmel.com>
+ *  Sandeep Sheriker M <sandeepsheriker.mallikarjun@microchip.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public

@@ -1,5 +1,7 @@
  /*
   * Copyright (C) 2014-2015  Atmel Corporation.
+  * Copyright (C) 2017 Microchip Technology Inc.
+  *              Sandeep Sheriker M <sandeepsheriker.mallikarjun@microchip.com>
   *
   * This library is free software; you can redistribute it and/or
   * modify it under the terms of the GNU Lesser General Public
@@ -67,7 +69,7 @@ enum
 #define PROP_DEFAULT_CROP_WIDTH  0
 #define PROP_DEFAULT_CROP_HEIGHT 0
 #define PROP_DEFAULT_MASK1_LOCATION NULL
-#define PROP_DEFAULT_USE_DRM FALSE
+#define PROP_DEFAULT_USE_DRM TRUE
 #define PROP_DEFAULT_MASK1_X 0
 #define PROP_DEFAULT_MASK1_Y 0
 #define PROP_DEFAULT_MASK1_WIDTH 0
@@ -81,7 +83,7 @@ GST_STATIC_PAD_TEMPLATE ("src",
     GST_PAD_SRC,
     GST_PAD_ALWAYS,
     GST_STATIC_CAPS (GST_VIDEO_CAPS_MAKE
-        ("{ GRAY8, YUY2, YVYU, UYVY, NV16, I420, NV12, RGB15, RGB16, BGR15, BGR16, RGBx, BGRx }")));
+        ("{ BGRx, YUY2, YVYU, UYVY, NV16, I420, NV12, RGB15, RGB16, BGR15, BGR16, RGBx, GRAY8 }")));
 
 GST_DEBUG_CATEGORY_STATIC (g1_base_dec_debug);
 #define GST_CAT_DEFAULT g1_base_dec_debug
@@ -95,6 +97,8 @@ G_DEFINE_TYPE (GstG1BaseDec, gst_g1_base_dec, GST_TYPE_VIDEO_DECODER);
 /* Enable to get physical address of gem, 
    otherwise hardcoded physical address for debugging */
 #define ATMEL_GET_PHYSICAL
+
+extern guint32 gst_g1_gem_get_physical (void);
 
 static void gst_g1_base_dec_get_property (GObject * object, guint prop_id,
     GValue * value, GParamSpec * pspec);
@@ -130,7 +134,7 @@ static void gst_g1_base_dec_config_saturation (GstG1BaseDec * g1dec,
 static void gst_g1_base_dec_config_crop (GstG1BaseDec * g1dec,
     gint x, gint y, gint width, gint height);
 static void gst_g1_base_dec_config_mask1 (GstG1BaseDec * g1dec,
-    gchar * location, gint x, gint y, gint width, gint height);
+    const gchar * location, gint x, gint y, gint width, gint height);
 
 static void
 gst_g1_base_dec_class_init (GstG1BaseDecClass * klass)
@@ -499,6 +503,67 @@ srcerror:
 }
 
 static GstFlowReturn
+gst_g1_base_dec_stream_header(GstVideoDecoder * decoder) 
+{
+    GstG1BaseDec *g1dec;
+    GstG1BaseDecClass *g1decclass;
+    GstMemory *mem, *g1mem;
+    GstFlowReturn ret = GST_FLOW_OK;
+    GstCaps *sinkcaps;
+    const gchar *mimetype;
+    const GstStructure *structure;
+    GstBuffer *streamheader = NULL;
+    gchar *desc = NULL;
+    const GValue *value = NULL;
+    
+    g1dec = GST_G1_BASE_DEC (decoder);
+    g1decclass = GST_G1_BASE_DEC_CLASS (G_OBJECT_GET_CLASS (g1dec));
+    
+    sinkcaps = gst_pad_get_allowed_caps (GST_VIDEO_DECODER_SINK_PAD (decoder));
+    sinkcaps = gst_caps_fixate (sinkcaps);
+    desc = gst_caps_to_string (sinkcaps);
+
+    structure = gst_caps_get_structure (sinkcaps, 0);
+    mimetype = gst_structure_get_name (structure);
+    if (!strcmp (mimetype, "video/mpeg")) {
+        if ((value = gst_structure_get_value (structure, "codec_data"))) {
+            streamheader = gst_value_get_buffer (value);           
+        }
+    } else if (!strcmp (mimetype, "video/x-vp8")) {
+        if ((value = gst_structure_get_value (structure, "streamheader"))) {
+            streamheader = gst_value_get_buffer (value);  
+        }
+    }
+    
+    if(streamheader != NULL) 
+    {
+        mem = gst_buffer_get_all_memory (streamheader);
+        if (!GST_IS_G1_ALLOCATOR (mem->allocator))
+        {
+            if (!gst_g1_base_dec_copy_memory (g1dec, &g1mem, mem)) 
+            { 
+                GST_ERROR_OBJECT (g1dec,
+                    "unable to copy stream header to contiguous memory");
+                ret = GST_FLOW_NOT_SUPPORTED;
+                goto exit;
+            }
+            gst_memory_unref (mem);
+            streamheader = gst_buffer_make_writable(streamheader); 
+            gst_buffer_replace_all_memory (streamheader, g1mem);
+        }
+        
+        GST_FIXME_OBJECT (g1dec, "Passing stream header to decoder");
+        g_return_val_if_fail (g1decclass->decode_header, GST_FLOW_NOT_SUPPORTED);        
+        ret = g1decclass->decode_header (g1dec, streamheader);        
+    }
+
+    exit:
+        if(desc)
+            g_free (desc);
+        return ret;
+}
+
+static GstFlowReturn
 gst_g1_base_dec_handle_frame (GstVideoDecoder * decoder,
     GstVideoCodecFrame * frame)
 {
@@ -519,18 +584,18 @@ gst_g1_base_dec_handle_frame (GstVideoDecoder * decoder,
 
   GST_LOG_OBJECT (g1dec, "Testing contiguousness");
   if (!GST_IS_G1_ALLOCATOR (mem->allocator)) {
-    if (!gst_g1_base_dec_copy_memory (g1dec, &g1mem, mem)) {
-      GST_ERROR_OBJECT (g1dec,
-          "unable to copy input buffer to contiguous memory");
-      ret = GST_FLOW_NOT_SUPPORTED;
-      goto exit;
-    }
-    gst_memory_unref (mem);
-    gst_buffer_replace_all_memory (frame->input_buffer, g1mem);
+      if (!gst_g1_base_dec_copy_memory (g1dec, &g1mem, mem)) {
+          GST_ERROR_OBJECT (g1dec,
+                  "unable to copy input buffer to contiguous memory");
+          ret = GST_FLOW_NOT_SUPPORTED;
+          goto exit;
+      }
+      gst_memory_unref (mem);
+      gst_buffer_replace_all_memory (frame->input_buffer, g1mem);      
   }
 
-  GST_LOG_OBJECT (g1dec, "Passing buffer to decoder");
-  ret = g1decclass->decode (g1dec, frame);
+  GST_LOG_OBJECT (g1dec, "Passing buffer to decoder");  
+  ret = g1decclass->decode (g1dec, frame);    
   end = gst_util_get_timestamp ();
   GST_CAT_DEBUG (GST_CAT_PERFORMANCE, "Processed buffer in %" GST_TIME_FORMAT,
       GST_TIME_ARGS (end - start));
@@ -552,7 +617,10 @@ gst_g1_base_dec_set_format (GstVideoDecoder * decoder,
   GstCaps *caps;
   GstVideoInfo vinfo;
   gboolean ret;
-  gchar *desc;
+  gchar *desc = NULL;
+
+  if(dec->dectype != PP_PIPELINED_DEC_TYPE_H264)
+    gst_g1_base_dec_stream_header(decoder);
 
   caps = gst_pad_get_allowed_caps (GST_VIDEO_DECODER_SRC_PAD (decoder));
   caps = gst_caps_fixate (caps);
@@ -585,10 +653,9 @@ gst_g1_base_dec_set_format (GstVideoDecoder * decoder,
       dec->crop_width, dec->crop_height);
 
 exit:
-  {
-    g_free (desc);
+    if(desc)
+        g_free (desc);
     return ret;
-  }
 }
 
 static gboolean
@@ -639,7 +706,6 @@ gst_g1_base_dec_allocate_output (GstG1BaseDec * dec, GstVideoCodecFrame * frame)
     goto exit;
   }
 
-
   state = gst_video_decoder_get_output_state (bdec);
   vinfo = &state->info;
   finfo = vinfo->finfo;
@@ -663,7 +729,7 @@ gst_g1_base_dec_allocate_output (GstG1BaseDec * dec, GstVideoCodecFrame * frame)
 
   /* Width and Height of the video overlay taken from user */
 
-    dec->ppconfig.ppOutFrmBuffer.enable = 1;
+    dec->ppconfig.ppOutFrmBuffer.enable = 0;
     dec->ppconfig.ppOutFrmBuffer.writeOriginX = dec->x;
     dec->ppconfig.ppOutFrmBuffer.writeOriginY = dec->y;
     dec->ppconfig.ppOutFrmBuffer.frameBufferWidth = (divRoundClosest(dec->w, 16)*16);
@@ -680,7 +746,6 @@ gst_g1_base_dec_allocate_output (GstG1BaseDec * dec, GstVideoCodecFrame * frame)
 
     dec->ppconfig.ppOutImg.width = GST_VIDEO_INFO_WIDTH (vinfo);
     dec->ppconfig.ppOutImg.height = GST_VIDEO_INFO_HEIGHT (vinfo);
-
   }
 
 #define Y 0
@@ -980,13 +1045,13 @@ gst_g1_base_dec_config_saturation (GstG1BaseDec * g1dec, gint saturation)
 
 static void
 gst_g1_base_dec_config_mask1 (GstG1BaseDec * g1dec,
-    gchar * location, gint x, gint y, gint width, gint height)
+    const gchar * location, gint x, gint y, gint width, gint height)
 {
   FILE *rgbfile = NULL;
   gsize rgbsize;
   gchar *tmplocation;
 
-  if (location != -1) {
+  if (location != NULL) {
     tmplocation = g1dec->mask1_location;
 
     if (location) {
@@ -1236,27 +1301,53 @@ static gboolean
 gst_g1_base_dec_sink_query (GstVideoDecoder * decoder,
     GstQuery * query)
 {
+  GstG1BaseDec *g1dec = GST_G1_BASE_DEC (decoder);
   GstPad *pad = GST_VIDEO_DECODER_SINK_PAD (decoder);
   gboolean ret = FALSE;
-
+    
   GST_INFO_OBJECT (decoder, "handling query: %" GST_PTR_FORMAT, query);
 
-  switch (GST_QUERY_TYPE (query)) {
-    case GST_QUERY_CAPS:{
-      GstCaps *caps;
-
-      /* Create caps structure */
-      caps = gst_caps_new_simple("video/x-h264",
-                "stream-format", G_TYPE_STRING, "byte-stream", NULL);
-      gst_query_set_caps_result (query, caps);
-      gst_caps_unref (caps);
-      ret = TRUE;
-      break;
+  switch (GST_QUERY_TYPE (query)) 
+  {
+    case GST_QUERY_CAPS:
+    {
+        GstCaps *caps;
+        /* Create caps structure */
+        if(g1dec->dectype == PP_PIPELINED_DEC_TYPE_H264) 
+        {
+            caps = gst_caps_new_simple("video/x-h264",
+                        "stream-format", G_TYPE_STRING, "byte-stream", NULL);
+            gst_query_set_caps_result (query, caps);
+            gst_caps_unref (caps);
+            ret = TRUE;
+        }
+        else if(g1dec->dectype == PP_PIPELINED_DEC_TYPE_MPEG4)
+        {
+            caps = gst_caps_new_simple("video/mpeg", 
+                            "systemstream", G_TYPE_BOOLEAN, FALSE,
+                            "mpegversion", G_TYPE_INT, 4, NULL);
+            gst_caps_append (caps, gst_caps_new_simple ("video/x-h263",
+                            "variant", G_TYPE_STRING, "itu", NULL));
+            gst_query_set_caps_result (query, caps);
+            gst_caps_unref (caps);
+            ret = TRUE;
+        }
+        else if (g1dec->dectype == PP_PIPELINED_DEC_TYPE_VP8) 
+        {
+            caps = gst_caps_new_simple ("video/x-vp8", NULL);
+            gst_query_set_caps_result (query, caps);
+            gst_caps_unref (caps);
+            ret = TRUE;
+        } 
+        else
+        {
+            ret = gst_pad_query_default (pad, GST_OBJECT (decoder), query);
+        }
+        break;
     }
     default:
       ret = gst_pad_query_default (pad, GST_OBJECT (decoder), query);
       break;
   }
-
   return ret;
 }
